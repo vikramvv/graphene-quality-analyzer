@@ -18,7 +18,7 @@ A Streamlit-based application for automated Raman spectroscopy analysis of graph
 
 ```bash
 # Clone the repository
-git clone <your-repo-url>
+git clone https://github.com/vikramvv/graphene-quality-analyzer.git
 cd graphene-quality-analyzer
 
 # Create and activate environment with Hatch
