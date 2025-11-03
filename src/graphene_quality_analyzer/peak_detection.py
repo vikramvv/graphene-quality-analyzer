@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.signal import find_peaks
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 
 # Expected peak positions (cm-1) with wider windows
@@ -11,68 +11,157 @@ EXPECTED_PEAKS = {
 }
 
 
-def detect_peaks(wavelength: np.ndarray,
-                intensity: np.ndarray,
-                prominence: float = 0.1,
-                distance: int = 100) -> np.ndarray:
+# --- helpers ---
+
+def _cm_to_samples(dx_cm1: float, wavelength: np.ndarray) -> int:
+    """Convert cm-1 distance to number of samples."""
+    step = float(np.median(np.diff(wavelength)))
+    if step == 0 or not np.isfinite(step):
+        step = 1.0
+    return max(1, int(round(abs(dx_cm1) / abs(step))))
+
+
+def _robust_noise(y: np.ndarray, frac_bg: float = 0.30):
+    """Return (sigma, bg_median) estimated from the lowest-intensity fraction."""
+    y = np.asarray(y, float)
+    n = len(y)
+    if n == 0:
+        return 1.0, 0.0
+    k = max(50, int(frac_bg * n))
+    idx = np.argpartition(y, k)[:k]
+    bg = y[idx]
+    med = float(np.median(bg))
+    mad = float(np.median(np.abs(bg - med)))
+    sigma = 1.4826 * mad if mad > 0 else float(np.std(bg))
+    return max(sigma, 1e-12), med
+
+
+# --- main API ---
+
+def detect_peaks(
+    wavelength: np.ndarray,
+    intensity: np.ndarray,
+    prominence: Optional[float] = None,   # absolute prominence (intensity units); if None, compute from noise
+    distance: Optional[int] = None,       # points; if None compute from min_distance_cm1
+    min_distance_cm1: float = 60.0,       # physical separation between peaks
+    min_prom_sigmas: float = 7.0,         # if prominence is None, use X * noise_sigma
+    min_height_sigmas: float = 3.5        # minimum height above background
+) -> np.ndarray:
     """
-    Detect peaks in the spectrum.
+    Detect peaks with absolute thresholds tied to the noise (not normalized to global max).
     
     Args:
         wavelength: Wavelength/Raman shift array
         intensity: Intensity array (baseline corrected)
-        prominence: Minimum prominence for peak detection (relative to max intensity)
-        distance: Minimum distance between peaks in number of points
+        prominence: Absolute prominence in intensity units (if None, auto-calculated)
+        distance: Minimum distance between peaks in points (if None, calculated from min_distance_cm1)
+        min_distance_cm1: Minimum physical separation between peaks in cm-1
+        min_prom_sigmas: Number of sigmas above noise for prominence threshold
+        min_height_sigmas: Number of sigmas above background for height threshold
         
     Returns:
         Array of peak indices
     """
-    # Normalize intensity for prominence calculation
-    normalized_intensity = intensity / intensity.max()
-    
-    # Find peaks
-    peaks, properties = find_peaks(
-        normalized_intensity,
-        prominence=prominence,
-        distance=distance
-    )
+    # Ensure x is sorted to keep distance meaningful
+    order = np.argsort(wavelength)
+    x = np.asarray(wavelength, float)[order]
+    y = np.asarray(intensity, float)[order]
+
+    # Robust noise & background
+    sigma, bg_med = _robust_noise(y)
+
+    # Thresholds
+    prom_abs = float(prominence) if prominence is not None else (min_prom_sigmas * sigma)
+    height_abs = bg_med + min_height_sigmas * sigma
+    dist_pts = int(distance) if distance is not None else _cm_to_samples(min_distance_cm1, x)
+
+    # DEBUG: print thresholds actually used
+    print(f"[detect_peaks] step≈{np.median(np.diff(x)):.3f} cm^-1/pt | distance={dist_pts} pts "
+          f"(~{dist_pts*np.median(np.diff(x)):.1f} cm^-1), height>={height_abs:.3f}, prominence>={prom_abs:.3f}")
+
+    # Find peaks on absolute signal (no normalization)
+    peaks, props = find_peaks(y, prominence=prom_abs, distance=dist_pts, height=height_abs)
+
+    print(f"[detect_peaks] raw peaks found: {len(peaks)}")
+    if len(peaks) > 0:
+        print(f"[detect_peaks] peak positions: {x[peaks]}")
     
     return peaks
 
 
-def refine_peak_regions(wavelength: np.ndarray, 
-                       peak_indices: np.ndarray) -> Dict[str, Tuple[int, int]]:
+def refine_peak_regions(
+    wavelength: np.ndarray,
+    peak_indices: np.ndarray,
+    intensity: Optional[np.ndarray] = None,
+    window_half_width_cm1: float = 80.0,
+    force_detection: bool = True
+) -> Dict[str, Optional[Tuple[int, int, int]]]:
     """
-    Identify which peaks correspond to D, G, and 2D peaks.
+    Map detected peaks to D/G/2D. Use strongest (by intensity) candidate inside each expected window.
+    If force_detection=True, will search for local maxima in expected regions even if not in peak_indices.
     
     Args:
-        wavelength: Wavelength/Raman shift array
+        wavelength: Wavelength array
         peak_indices: Indices of detected peaks
+        intensity: Intensity array (for force detection)
+        window_half_width_cm1: Half-width of fitting window around peak
+        force_detection: If True, search for local maxima even if peak not detected
         
     Returns:
-        Dictionary mapping peak names to (start_idx, end_idx) for fitting window
+        Dictionary mapping peak names to (start_idx, end_idx, peak_idx) or None
     """
-    peak_regions = {}
-    peak_positions = wavelength[peak_indices]
+    peak_regions: Dict[str, Optional[Tuple[int, int, int]]] = {}
+    if peak_indices is None:
+        peak_indices = np.array([], dtype=int)
+
+    x = np.asarray(wavelength, float)
+    y = np.asarray(intensity, float) if intensity is not None else np.ones(len(x))
     
-    for peak_name, (min_pos, max_pos) in EXPECTED_PEAKS.items():
-        # Find peaks in the expected range
-        in_range = (peak_positions >= min_pos) & (peak_positions <= max_pos)
+    strengths = y[peak_indices] if len(peak_indices) > 0 else np.array([])
+    pos = x[peak_indices] if len(peak_indices) > 0 else np.array([])
+    half_pts = _cm_to_samples(window_half_width_cm1, x)
+
+    for name, (lo, hi) in EXPECTED_PEAKS.items():
+        # First try to find in detected peaks
+        in_range = (pos >= lo) & (pos <= hi)
         
         if np.any(in_range):
-            # Get the strongest peak in this range
-            candidates = peak_indices[in_range]
-            peak_idx = candidates[0]  # Take first (should be strongest after filtering)
+            cand_idx = np.where(in_range)[0]
+            best = cand_idx[np.argmax(strengths[in_range])]
+            pk = int(peak_indices[best])
             
-            # Define fitting window around the peak
-            window_size = 100  # points around peak
-            start_idx = max(0, peak_idx - window_size)
-            end_idx = min(len(wavelength), peak_idx + window_size)
+            start = max(0, pk - half_pts)
+            end = min(len(x), pk + half_pts)
+            peak_regions[name] = (start, end, pk)
+            print(f"[refine] {name} peak found in detected peaks at {x[pk]:.1f} cm⁻¹ (intensity: {y[pk]:.1f})")
             
-            peak_regions[peak_name] = (start_idx, end_idx, peak_idx)
+        elif force_detection:
+            # Force detection: find strongest local maximum in expected region
+            mask = (x >= lo) & (x <= hi)
+            if np.any(mask):
+                indices = np.where(mask)[0]
+                y_region = y[mask]
+                
+                # Find local maximum in this region
+                if len(y_region) > 5:
+                    # Look for the highest point
+                    local_max_rel = np.argmax(y_region)
+                    pk = indices[local_max_rel]
+                    
+                    # Check if it's actually a peak (higher than neighbors)
+                    if pk > 0 and pk < len(y) - 1:
+                        if y[pk] > y[pk-1] and y[pk] > y[pk+1]:
+                            start = max(0, pk - half_pts)
+                            end = min(len(x), pk + half_pts)
+                            peak_regions[name] = (start, end, pk)
+                            print(f"[refine] {name} peak FORCED at {x[pk]:.1f} cm⁻¹ (intensity: {y[pk]:.1f})")
+                            continue
+            
+            peak_regions[name] = None
+            print(f"[refine] {name} peak NOT FOUND in range {lo}-{hi} cm⁻¹")
         else:
-            peak_regions[peak_name] = None
-    
+            peak_regions[name] = None
+
     return peak_regions
 
 
@@ -80,7 +169,7 @@ def estimate_peak_width(wavelength: np.ndarray,
                        intensity: np.ndarray,
                        peak_idx: int) -> float:
     """
-    Estimate FWHM of a peak.
+    Estimate FWHM of a peak using linear interpolation at half-maximum.
     
     Args:
         wavelength: Wavelength array
@@ -90,27 +179,39 @@ def estimate_peak_width(wavelength: np.ndarray,
     Returns:
         Estimated FWHM in wavelength units
     """
-    peak_intensity = intensity[peak_idx]
-    half_max = peak_intensity / 2
-    
+    x = np.asarray(wavelength, float)
+    y = np.asarray(intensity, float)
+
+    if peak_idx <= 0 or peak_idx >= len(y) - 1:
+        return 30.0
+
+    half = 0.5 * y[peak_idx]
+
     # Find left half-maximum
-    left_idx = peak_idx
-    while left_idx > 0 and intensity[left_idx] > half_max:
-        left_idx -= 1
+    li = peak_idx
+    while li > 0 and y[li] > half:
+        li -= 1
     
     # Find right half-maximum
-    right_idx = peak_idx
-    while right_idx < len(intensity) - 1 and intensity[right_idx] > half_max:
-        right_idx += 1
+    ri = peak_idx
+    while ri < len(y) - 1 and y[ri] > half:
+        ri += 1
+
+    if not (li < peak_idx < ri):
+        return 30.0
+
+    def _interp_x(i1, i2):
+        y1, y2 = y[i1], y[i2]
+        x1, x2 = x[i1], x[i2]
+        if y2 == y1:
+            return float(x1)
+        t = (half - y1) / (y2 - y1)
+        return float(x1 + t * (x2 - x1))
+
+    x_left = _interp_x(li, li + 1)
+    x_right = _interp_x(ri - 1, ri)
     
-    # Calculate FWHM
-    if left_idx < peak_idx < right_idx:
-        fwhm = wavelength[right_idx] - wavelength[left_idx]
-    else:
-        # Fallback to typical value
-        fwhm = 30.0
-    
-    return fwhm
+    return abs(x_right - x_left)
 
 
 def auto_adjust_detection_params(intensity: np.ndarray) -> Dict[str, float]:
@@ -123,20 +224,15 @@ def auto_adjust_detection_params(intensity: np.ndarray) -> Dict[str, float]:
     Returns:
         Dictionary of suggested parameters
     """
-    # Calculate signal-to-noise ratio
-    noise_std = np.std(intensity[:100])  # Estimate from beginning
-    signal_max = np.max(intensity)
-    snr = signal_max / noise_std if noise_std > 0 else 100
-    
-    # Adjust prominence based on SNR
+    noise_std = np.std(intensity[:100]) if len(intensity) >= 100 else np.std(intensity)
+    signal_max = np.max(intensity) if len(intensity) else 0.0
+    snr = signal_max / noise_std if noise_std > 0 else 100.0
+
     if snr > 50:
         prominence = 0.05
     elif snr > 20:
         prominence = 0.1
     else:
         prominence = 0.15
-    
-    return {
-        'prominence': prominence,
-        'distance': 100
-    }
+
+    return {'prominence': float(prominence), 'distance': 100.0}

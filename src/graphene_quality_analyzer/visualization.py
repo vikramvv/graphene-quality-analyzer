@@ -42,6 +42,21 @@ def plot_spectrum_with_peaks(data: Dict) -> go.Figure:
         line=dict(color='black', width=2)
     ))
     
+    # Add shaded regions for expected peak locations
+    peak_ranges = {'D': (1250, 1450), 'G': (1480, 1680), '2D': (2500, 2900)}
+    peak_colors = {'D': 'rgba(255,0,0,0.1)', 'G': 'rgba(0,0,255,0.1)', '2D': 'rgba(0,255,0,0.1)'}
+    
+    max_intensity = data['intensity_corrected'].max()
+    for peak_name, (lo, hi) in peak_ranges.items():
+        fig.add_vrect(
+            x0=lo, x1=hi,
+            fillcolor=peak_colors[peak_name],
+            layer="below",
+            line_width=0,
+            annotation_text=peak_name,
+            annotation_position="top left"
+        )
+    
     # Plot fitted peaks
     colors = {'D': 'red', 'G': 'blue', '2D': 'green'}
     
@@ -58,7 +73,9 @@ def plot_spectrum_with_peaks(data: Dict) -> go.Figure:
             fig.add_vline(
                 x=fit['position'],
                 line=dict(color=colors.get(peak_name, 'purple'), width=1, dash='dash'),
-                opacity=0.5
+                opacity=0.5,
+                annotation_text=f"{peak_name}: {fit['position']:.0f}",
+                annotation_position="top"
             )
     
     fig.update_layout(

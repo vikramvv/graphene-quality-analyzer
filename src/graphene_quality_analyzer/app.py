@@ -82,21 +82,55 @@ with st.sidebar:
             st.subheader("⚙️ Analysis Parameters")
             
             with st.expander("Peak Detection", expanded=False):
-                prominence = st.slider(
-                    "Peak prominence",
-                    min_value=0.01,
-                    max_value=0.5,
-                    value=0.1,
-                    step=0.01,
-                    help="Higher values = more selective peak detection"
+                # Use absolute prominence (intensity units) instead of normalized
+                use_auto_prominence = st.checkbox(
+                    "Auto-detect prominence from noise",
+                    value=True,
+                    help="Automatically calculate prominence based on signal noise"
                 )
                 
-                min_peak_distance = st.slider(
+                if not use_auto_prominence:
+                    prominence_abs = st.number_input(
+                        "Absolute prominence (intensity units)",
+                        min_value=1.0,
+                        max_value=10000.0,
+                        value=100.0,
+                        step=10.0,
+                        help="Minimum prominence in actual intensity units"
+                    )
+                else:
+                    prominence_abs = None
+                    min_prom_sigmas = st.slider(
+                        "Prominence (sigmas above noise)",
+                        min_value=2.0,
+                        max_value=15.0,
+                        value=7.0,
+                        step=0.5,
+                        help="How many noise standard deviations above background"
+                    )
+                
+                min_distance_cm1 = st.slider(
                     "Minimum peak distance (cm⁻¹)",
-                    min_value=50,
-                    max_value=300,
-                    value=100,
-                    help="Minimum separation between detected peaks"
+                    min_value=30.0,
+                    max_value=200.0,
+                    value=60.0,
+                    step=10.0,
+                    help="Minimum physical separation between detected peaks"
+                )
+                
+                window_half_width = st.slider(
+                    "Peak fitting window (±cm⁻¹)",
+                    min_value=40.0,
+                    max_value=150.0,
+                    value=80.0,
+                    step=10.0,
+                    help="Half-width of window around peak for fitting"
+                )
+                
+                force_peak_detection = st.checkbox(
+                    "Force detect peaks in expected regions",
+                    value=True,
+                    help="Even if peaks aren't detected, look for local maxima in D/G/2D regions"
                 )
             
             with st.expander("Baseline Correction", expanded=False):
@@ -160,9 +194,17 @@ with st.sidebar:
             auto_save = st.checkbox("Auto-save analysis state", value=True)
             
             # Analyze button
-            if st.button("🔍 Analyze Selected Materials", type="primary", use_container_width=True):
+            if st.button("🔍 Analyze Selected Materials", type="primary", width='stretch'):
                 progress_bar = st.progress(0)
                 status_text = st.empty()
+                
+                # Get parameters
+                use_auto = use_auto_prominence if 'use_auto_prominence' in locals() else True
+                prom_abs = prominence_abs if not use_auto else None
+                prom_sigmas = min_prom_sigmas if use_auto else 7.0
+                dist_cm1 = min_distance_cm1 if 'min_distance_cm1' in locals() else 60.0
+                win_half = window_half_width if 'window_half_width' in locals() else 80.0
+                baseline_order = baseline_poly_order if 'baseline_poly_order' in locals() else 2
                 
                 for idx, sheet_name in enumerate(selected_sheets):
                     status_text.text(f"Analyzing: {sheet_name}")
@@ -174,19 +216,35 @@ with st.sidebar:
                     intensity_corrected, baseline = baseline_correction(
                         wavelength, 
                         intensity,
-                        poly_order=baseline_poly_order
+                        poly_order=baseline_order
                     )
                     
                     # Detect peaks
-                    peak_indices = detect_peaks(
-                        wavelength,
-                        intensity_corrected,
-                        prominence=prominence,
-                        distance=min_peak_distance
-                    )
+                    if use_auto:
+                        peak_indices = detect_peaks(
+                            wavelength,
+                            intensity_corrected,
+                            prominence=None,
+                            distance=None,
+                            min_distance_cm1=dist_cm1,
+                            min_prom_sigmas=prom_sigmas
+                        )
+                    else:
+                        peak_indices = detect_peaks(
+                            wavelength,
+                            intensity_corrected,
+                            prominence=prom_abs,
+                            distance=None,
+                            min_distance_cm1=dist_cm1
+                        )
                     
                     # Refine to D, G, 2D regions
-                    peak_regions = refine_peak_regions(wavelength, peak_indices)
+                    peak_regions = refine_peak_regions(
+                        wavelength, 
+                        peak_indices,
+                        intensity=intensity_corrected,
+                        window_half_width_cm1=win_half
+                    )
                     
                     # Fit peaks
                     fits = fit_all_peaks(wavelength, intensity_corrected, peak_regions)
@@ -267,22 +325,35 @@ if uploaded_file and selected_sheets and st.session_state.analyzed_data:
             # Debug info
             with st.expander("🔍 Detection Debug Info"):
                 st.write("**Peak Detection Results:**")
+                st.write(f"**Data Range:** {data['wavelength'].min():.1f} - {data['wavelength'].max():.1f} cm⁻¹")
+                st.write(f"**Total Points:** {len(data['wavelength'])}")
+                st.write(f"**Max Intensity:** {data['intensity_corrected'].max():.1f}")
+                st.write("")
+                
                 for peak_name, region in data['peak_regions'].items():
+                    expected_range = {'D': '1250-1450', 'G': '1480-1680', '2D': '2500-2900'}
+                    st.write(f"**{peak_name} Peak** (expected {expected_range.get(peak_name, 'N/A')} cm⁻¹):")
                     if region:
                         start_idx, end_idx, peak_idx = region
                         peak_pos = data['wavelength'][peak_idx]
-                        st.write(f"- {peak_name} peak detected at {peak_pos:.1f} cm⁻¹")
+                        peak_int = data['intensity_corrected'][peak_idx]
+                        st.write(f"  ✅ Detected at {peak_pos:.1f} cm⁻¹ (intensity: {peak_int:.1f})")
+                        
+                        # Show if fit succeeded
+                        if data['fits'][peak_name]:
+                            fit_pos = data['fits'][peak_name]['position']
+                            r2 = data['fits'][peak_name]['r_squared']
+                            st.write(f"  ✅ Fitted at {fit_pos:.1f} cm⁻¹ (R² = {r2:.4f})")
+                        else:
+                            st.write(f"  ❌ Fitting failed")
                     else:
-                        st.write(f"- {peak_name} peak: NOT DETECTED")
-                
-                st.write(f"\n**Data Range:** {data['wavelength'].min():.1f} - {data['wavelength'].max():.1f} cm⁻¹")
-                st.write(f"**Total Points:** {len(data['wavelength'])}")
+                        st.write(f"  ❌ NOT DETECTED in expected range")
             
             st.divider()
             
             # Main spectrum plot
             fig = plot_spectrum_with_peaks(data)
-            st.plotly_chart(fig, use_container_width=True, key=f"main_spectrum_{material}")
+            st.plotly_chart(fig, width='stretch', key=f"main_spectrum_{material}")
             
             st.divider()
             
@@ -340,7 +411,7 @@ if uploaded_file and selected_sheets and st.session_state.analyzed_data:
                             fit_data,
                             peak_name
                         )
-                        st.plotly_chart(fig_detail, use_container_width=True, key=f"detail_{material}_{peak_name}")
+                        st.plotly_chart(fig_detail, width='stretch', key=f"detail_{material}_{peak_name}")
                         
                         # Fit parameters
                         col1, col2, col3 = st.columns(3)
@@ -384,7 +455,7 @@ if uploaded_file and selected_sheets and st.session_state.analyzed_data:
                 normalize=normalize,
                 region=region
             )
-            st.plotly_chart(fig, use_container_width=True, key="comparison_plot")
+            st.plotly_chart(fig, width='stretch', key="comparison_plot")
             
             # Quick comparison table
             st.subheader("Quick Metrics Comparison")
@@ -404,7 +475,7 @@ if uploaded_file and selected_sheets and st.session_state.analyzed_data:
                 })
             
             df = pd.DataFrame(comparison_data)
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width='stretch', hide_index=True)
         else:
             st.info("No materials analyzed yet. Please run analysis first.")
     
@@ -420,11 +491,11 @@ if uploaded_file and selected_sheets and st.session_state.analyzed_data:
             
             col1, col2 = st.columns(2)
             with col1:
-                st.plotly_chart(figs['id_ig'], use_container_width=True, key="metrics_id_ig")
-                st.plotly_chart(figs['fwhm'], use_container_width=True, key="metrics_fwhm")
+                st.plotly_chart(figs['id_ig'], width='stretch', key="metrics_id_ig")
+                st.plotly_chart(figs['fwhm'], width='stretch', key="metrics_fwhm")
             with col2:
-                st.plotly_chart(figs['i2d_ig'], use_container_width=True, key="metrics_i2d_ig")
-                st.plotly_chart(figs['positions'], use_container_width=True, key="metrics_positions")
+                st.plotly_chart(figs['i2d_ig'], width='stretch', key="metrics_i2d_ig")
+                st.plotly_chart(figs['positions'], width='stretch', key="metrics_positions")
             
             st.divider()
             
@@ -453,7 +524,7 @@ if uploaded_file and selected_sheets and st.session_state.analyzed_data:
                 })
             
             df_detailed = pd.DataFrame(detailed_data)
-            st.dataframe(df_detailed, use_container_width=True, hide_index=True)
+            st.dataframe(df_detailed, width='stretch', hide_index=True)
         else:
             st.info("No materials analyzed yet. Please run analysis first.")
     
@@ -470,7 +541,7 @@ if uploaded_file and selected_sheets and st.session_state.analyzed_data:
             
             with col1:
                 # Excel export
-                if st.button("📊 Generate Excel Report", type="primary", use_container_width=True):
+                if st.button("📊 Generate Excel Report", type="primary", width='stretch'):
                     excel_buffer = export_results_to_excel(
                         st.session_state.analyzed_data,
                         materials_to_export,
@@ -483,12 +554,12 @@ if uploaded_file and selected_sheets and st.session_state.analyzed_data:
                         data=excel_buffer,
                         file_name="graphene_analysis_report.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True
+                        width='stretch'
                     )
             
             with col2:
                 # Text report
-                if st.button("📄 Generate Text Report", type="primary", use_container_width=True):
+                if st.button("📄 Generate Text Report", type="primary", width='stretch'):
                     report_text = generate_report_text(
                         st.session_state.analyzed_data,
                         materials_to_export,
@@ -501,7 +572,7 @@ if uploaded_file and selected_sheets and st.session_state.analyzed_data:
                         data=report_text,
                         file_name="graphene_analysis_report.txt",
                         mime="text/plain",
-                        use_container_width=True
+                        width='stretch'
                     )
             
             st.divider()
@@ -542,7 +613,7 @@ if uploaded_file and selected_sheets and st.session_state.analyzed_data:
                 
                 if fig:
                     # Display plot
-                    st.plotly_chart(fig, use_container_width=True, key=f"export_{export_material}_{plot_type}")
+                    st.plotly_chart(fig, width='stretch', key=f"export_{export_material}_{plot_type}")
                     
                     # Export options
                     col1, col2, col3 = st.columns(3)

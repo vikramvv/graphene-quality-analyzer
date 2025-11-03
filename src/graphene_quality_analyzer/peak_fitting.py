@@ -44,18 +44,18 @@ def voigt(x: np.ndarray, amplitude: float, center: float, sigma: float, gamma: f
 
 
 def fit_peak(wavelength: np.ndarray,
-            intensity: np.ndarray,
-            peak_idx: int,
-            model: str = 'lorentzian') -> Optional[Dict]:
+             intensity: np.ndarray,
+             peak_idx: int,
+             model: str = 'lorentzian') -> Optional[Dict]:
     """
     Fit a single peak with specified model.
-    
+
     Args:
         wavelength: Wavelength array for fitting window
         intensity: Intensity array for fitting window
         peak_idx: Index of peak center (relative to fitting window)
         model: 'lorentzian' or 'voigt'
-        
+
     Returns:
         Dictionary containing fit parameters and quality metrics, or None if fit fails
     """
@@ -63,7 +63,7 @@ def fit_peak(wavelength: np.ndarray,
         # Initial parameter guesses
         amplitude_guess = intensity[peak_idx]
         center_guess = wavelength[peak_idx]
-        
+
         # Estimate width from half-maximum
         half_max = amplitude_guess / 2
         left_idx = peak_idx
@@ -72,21 +72,27 @@ def fit_peak(wavelength: np.ndarray,
         right_idx = peak_idx
         while right_idx < len(intensity) - 1 and intensity[right_idx] > half_max:
             right_idx += 1
-        
+
         width_guess = (wavelength[right_idx] - wavelength[left_idx]) / 2
         if width_guess <= 0 or width_guess > 200:
             width_guess = 20.0
-        
+
         offset_guess = np.percentile(intensity, 10)
-        
+
+        # Robust bounds
+        amplitude_upper = max(amplitude_guess * 2, amplitude_guess + 10, 10)
+        width_lower = max(width_guess, 5)
+        width_upper = max(width_guess * 2, width_guess + 20, 20)
+        offset_upper = max(offset_guess * 2, offset_guess + 10, 10)
+
         if model == 'lorentzian':
-            # Fit Lorentzian
             p0 = [amplitude_guess, center_guess, width_guess, offset_guess]
             bounds = (
-                [0, center_guess - 50, 5, 0],
-                [amplitude_guess * 2, center_guess + 50, 200, offset_guess * 2]
+                [0, center_guess - 50, width_lower, 0],
+                [amplitude_upper, center_guess + 50, width_upper, offset_upper]
             )
-            
+            print(f"Fitting Lorentzian: p0={p0}, bounds={bounds}")
+
             popt, pcov = curve_fit(
                 lorentzian,
                 wavelength,
@@ -95,21 +101,22 @@ def fit_peak(wavelength: np.ndarray,
                 bounds=bounds,
                 maxfev=5000
             )
-            
+
             amplitude, center, width, offset = popt
             fitted_curve = lorentzian(wavelength, *popt)
-            
-            # FWHM for Lorentzian is 2 * width
             fwhm = 2 * width
-            
         elif model == 'voigt':
-            # Fit Voigt profile
+            sigma_lower = 1
+            sigma_upper = max(width_guess, 10)
+            gamma_lower = 1
+            gamma_upper = max(width_guess, 10)
             p0 = [amplitude_guess, center_guess, width_guess/2, width_guess/2, offset_guess]
             bounds = (
-                [0, center_guess - 50, 1, 1, 0],
-                [amplitude_guess * 2, center_guess + 50, 100, 100, offset_guess * 2]
+                [0, center_guess - 50, sigma_lower, gamma_lower, 0],
+                [amplitude_upper, center_guess + 50, sigma_upper, gamma_upper, offset_upper]
             )
-            
+            print(f"Fitting Voigt: p0={p0}, bounds={bounds}")
+
             popt, pcov = curve_fit(
                 voigt,
                 wavelength,
@@ -118,21 +125,19 @@ def fit_peak(wavelength: np.ndarray,
                 bounds=bounds,
                 maxfev=5000
             )
-            
+
             amplitude, center, sigma, gamma, offset = popt
             fitted_curve = voigt(wavelength, *popt)
-            
-            # Approximate FWHM for Voigt
             fwhm = 0.5346 * 2 * gamma + np.sqrt(0.2166 * (2 * gamma)**2 + (2.355 * sigma)**2)
         else:
             raise ValueError(f"Unknown model: {model}")
-        
+
         # Calculate R-squared
         residuals = intensity - fitted_curve
         ss_res = np.sum(residuals**2)
         ss_tot = np.sum((intensity - np.mean(intensity))**2)
         r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
-        
+
         # Extract peak parameters
         result = {
             'model': model,
@@ -147,13 +152,12 @@ def fit_peak(wavelength: np.ndarray,
             'parameters': popt,
             'covariance': pcov
         }
-        
+
         return result
-        
+
     except Exception as e:
         print(f"Peak fitting failed: {str(e)}")
         return None
-
 
 def fit_all_peaks(wavelength: np.ndarray,
                  intensity: np.ndarray,
