@@ -174,25 +174,12 @@ def plot_peak_fit_detail(wavelength: np.ndarray,
     
     return fig
 
-
 def plot_comparison(data_dict: Dict,
                    materials: List[str],
                    normalize: bool = False,
                    region: str = "Full Spectrum") -> go.Figure:
-    """
-    Plot comparison of multiple spectra.
-    
-    Args:
-        data_dict: Dictionary of analysis results
-        materials: List of material names to compare
-        normalize: Whether to normalize intensities
-        region: Region to display
-        
-    Returns:
-        Plotly figure
-    """
     fig = go.Figure()
-    
+
     # Define wavelength ranges for different regions
     ranges = {
         "Full Spectrum": (1000, 3000),
@@ -200,24 +187,25 @@ def plot_comparison(data_dict: Dict,
         "G Region (1500-1700)": (1500, 1700),
         "2D Region (2500-2900)": (2500, 2900)
     }
-    
+
     wave_min, wave_max = ranges.get(region, (1000, 3000))
-    
+
+    # Plot spectra for each material
     for material in materials:
         if material in data_dict:
             data = data_dict[material]
             wavelength = data['wavelength']
             intensity = data['intensity_corrected']
-            
+
             # Filter to region
             mask = (wavelength >= wave_min) & (wavelength <= wave_max)
             wave_region = wavelength[mask]
             int_region = intensity[mask]
-            
+
             # Normalize if requested
             if normalize and len(int_region) > 0:
                 int_region = int_region / int_region.max()
-            
+
             fig.add_trace(go.Scatter(
                 x=wave_region,
                 y=int_region,
@@ -225,9 +213,25 @@ def plot_comparison(data_dict: Dict,
                 line=dict(width=2),
                 mode='lines'
             ))
-    
+
+    # ✅ Add shaded regions for expected peaks (same as before)
+    peak_ranges = {'D': (1250, 1450), 'G': (1480, 1680), '2D': (2500, 2900)}
+    peak_colors = {'D': 'rgba(255,0,0,0.1)', 'G': 'rgba(0,0,255,0.1)', '2D': 'rgba(0,255,0,0.1)'}
+
+    for peak_name, (lo, hi) in peak_ranges.items():
+        # Only add shading if it overlaps with the current region
+        if hi >= wave_min and lo <= wave_max:
+            fig.add_vrect(
+                x0=max(lo, wave_min), x1=min(hi, wave_max),
+                fillcolor=peak_colors[peak_name],
+                layer="below",
+                line_width=0,
+                annotation_text=peak_name,
+                annotation_position="top left"
+            )
+
     ylabel = 'Normalized Intensity (a.u.)' if normalize else 'Intensity (a.u.)'
-    
+
     fig.update_layout(
         title=f'Spectrum Comparison - {region}',
         xaxis_title='Raman Shift (cm⁻¹)',
@@ -235,16 +239,16 @@ def plot_comparison(data_dict: Dict,
         hovermode='x unified',
         template='plotly_white',
         height=500,
-        legend=dict(
-            yanchor="top",
-            y=0.99,
-            xanchor="right",
-            x=0.99
-        )
+        legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99)
     )
-    
+    fig.update_layout(
+    title=dict(text='Spectrum Comparison', font=dict(size=24)),
+    font=dict(size=18),  # Global
+    legend=dict(font=dict(size=16))
+    )
+    fig.update_xaxes(title_font=dict(size=20), tickfont=dict(size=16))
+    fig.update_yaxes(title_font=dict(size=20), tickfont=dict(size=16))
     return fig
-
 
 def plot_metrics_comparison(data_dict: Dict, materials: List[str]) -> Dict[str, go.Figure]:
     """
