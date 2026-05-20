@@ -6,7 +6,7 @@ import numpy as np
 from pathlib import Path
 import io
 
-from data_loader import load_excel_data
+from data_loader import load_excel_data, load_txt_data
 from preprocessing import baseline_correction
 from peak_detection import detect_peaks, refine_peak_regions
 from peak_fitting import fit_peak, fit_all_peaks
@@ -27,6 +27,8 @@ st.set_page_config(
 )
 
 # Initialize session state
+uploaded_files = []
+selected_sheets = []
 if 'analyzed_data' not in st.session_state:
     st.session_state.analyzed_data = {}
 if 'verified_materials' not in st.session_state:
@@ -51,27 +53,38 @@ st.markdown("*Automated Raman spectroscopy analysis for graphene characterizatio
 with st.sidebar:
     st.header("📁 Data Input")
     
-    uploaded_file = st.file_uploader(
-        "Upload Excel file with Raman data",
-        type=['xlsx', 'xls'],
-        help="Each sheet should contain wavelength (Col A) and intensity (Col B)"
+    uploaded_files = st.file_uploader(
+        "Upload Raman data",
+        type=['xlsx', 'xls', 'txt'],
+        accept_multiple_files=True,
+        help="Excel: each sheet = one material. TXT (WITec format): upload multiple files, one per material."
     )
-    
-    if uploaded_file:
+
+    if uploaded_files:
         # Load data
         try:
-            data_dict = load_excel_data(uploaded_file)
-            st.success(f"✅ Loaded {len(data_dict)} sheets")
-            
+            data_dict = {}
+
+            for f in uploaded_files:
+                if f.name.lower().endswith(('.xlsx', '.xls')):
+                    sheets = load_excel_data(f)
+                    data_dict.update(sheets)
+                elif f.name.lower().endswith('.txt'):
+                    name = Path(f.name).stem
+                    wavelength, intensity = load_txt_data(f)
+                    data_dict[name] = (wavelength, intensity)
+
+            st.success(f"✅ Loaded {len(data_dict)} material(s)")
+
             # Show wavelength range info
             with st.expander("📊 Data Info"):
                 for sheet_name, (wave, _) in data_dict.items():
                     st.write(f"**{sheet_name}**: {wave.min():.1f} - {wave.max():.1f} cm⁻¹ ({len(wave)} points)")
-            
+
             # Sheet selection
             st.subheader("📊 Select Materials")
             selected_sheets = st.multiselect(
-                "Choose sheets to analyze",
+                "Choose materials to analyze",
                 options=list(data_dict.keys()),
                 default=list(data_dict.keys())
             )
@@ -275,7 +288,7 @@ with st.sidebar:
             st.stop()
 
 # Main content area
-if uploaded_file and selected_sheets and st.session_state.analyzed_data:
+if uploaded_files and selected_sheets and st.session_state.analyzed_data:
     
     tabs = st.tabs([
         "📈 Individual Analysis",

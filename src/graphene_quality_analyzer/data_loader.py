@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 
 def load_excel_data(file) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
@@ -49,6 +49,34 @@ def load_excel_data(file) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
         data_dict[sheet_name] = (wavelength, intensity)
     
     return data_dict
+
+
+def load_txt_data(file) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Load Raman data from a tab-separated txt file.
+
+    Expected format (WITec CheapTubeMap style):
+        #X    #Y    #Wave    #Intensity
+        ...   ...   ...      ...
+
+    Returns (wavelength, intensity) sorted by wavelength.
+    """
+    df = pd.read_csv(file, sep=r'\s+', engine='python', header=0)
+    if df.shape[1] < 4:
+        raise ValueError("Expected at least 4 columns: X, Y, Wave, Intensity")
+
+    wavelength = pd.to_numeric(df.iloc[:, 2], errors='coerce').values
+    intensity = pd.to_numeric(df.iloc[:, 3], errors='coerce').values
+
+    valid_mask = ~(np.isnan(wavelength) | np.isnan(intensity))
+    wavelength = wavelength[valid_mask]
+    intensity = intensity[valid_mask]
+
+    if len(wavelength) == 0:
+        raise ValueError("No valid numeric data found in Wave/Intensity columns")
+
+    sort_idx = np.argsort(wavelength)
+    return wavelength[sort_idx], intensity[sort_idx]
 
 
 def validate_raman_data(wavelength: np.ndarray, intensity: np.ndarray) -> bool:

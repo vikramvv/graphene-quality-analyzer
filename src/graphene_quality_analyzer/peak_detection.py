@@ -76,7 +76,7 @@ def detect_peaks(
     dist_pts = int(distance) if distance is not None else _cm_to_samples(min_distance_cm1, x)
 
     # DEBUG: print thresholds actually used
-    print(f"[detect_peaks] step≈{np.median(np.diff(x)):.3f} cm^-1/pt | distance={dist_pts} pts "
+    print(f"[detect_peaks] step~{np.median(np.diff(x)):.3f} cm^-1/pt | distance={dist_pts} pts "
           f"(~{dist_pts*np.median(np.diff(x)):.1f} cm^-1), height>={height_abs:.3f}, prominence>={prom_abs:.3f}")
 
     # Find peaks on absolute signal (no normalization)
